@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  # Сервис базы данных MySQL
+  db:
+    image: mysql:8.0
+    container_name: database
+    restart: unless-stopped
+    volumes:
+      - mysql_data:/var/lib/mysql
+    environment:
+      MYSQL_DATABASE: mydb
+      MYSQL_USER: user
+      MYSQL_PASSWORD: pass
+      MYSQL_ROOT_PASSWORD: root
+    ports:
+      - "3307:3306"
+
+  # Сервис веб-приложения Django
+  web:
+    build: ./backend
+    container_name: backend
+    command: /app/entrypoint.sh
+    volumes:
+      - ./backend:/app
+    ports:
+      - "8000:8000"
+    environment:
+      - DJANGO_SUPERUSER_USERNAME=admin
+      - DJANGO_SUPERUSER_PASSWORD=admin
+      - DJANGO_SUPERUSER_EMAIL=admin@example.com
+    env_file:
+      - ./backend/.env
+    depends_on:
+      - db
+
+  # Сервис для запуска тестов Pytest
+#  pytest:
+#    build: .
+#    container_name: pytest
+#    command: pytest
+#    volumes:
+#      - ./src:/app
+#    env_file:
+#      - ./.env
+#    depends_on:
+#      - db
+
+volumes:
+  mysql_data:
