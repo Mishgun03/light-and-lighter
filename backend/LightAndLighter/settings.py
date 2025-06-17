@@ -25,7 +25,6 @@ load_dotenv(os.path.join(BASE_DIR, '.env'))
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-# SECRET_KEY = 'django-insecure-f5=2+1u@10ab3*wop13i)2hrzf(f_$h2v(kyh^1600y=7_5_-='
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-default-key-for-dev')
 
 # SECURITY WARNING: don't run with debug turned on in production!
@@ -47,6 +46,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'drf_spectacular',
     'rest_framework_simplejwt',
+    'corsheaders',
     'users.apps.UsersConfig',
     'market.apps.MarketConfig',
 ]
@@ -59,6 +59,7 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'corsheaders.middleware.CorsMiddleware'
 ]
 
 ROOT_URLCONF = 'LightAndLighter.urls'
@@ -152,21 +153,13 @@ REST_FRAMEWORK = {
 }
 
 SPECTACULAR_SETTINGS = {
-    # 'TITLE': 'My Project API',
-    # 'DESCRIPTION': 'Documentation for my amazing API',
-    # 'VERSION': '1.0.0',
-    # # ... другие ваши настройки ...
-
-    # ВОТ РЕШЕНИЕ:
-    # Отключаем алфавитную сортировку параметров операции (запроса).
-    # Теперь drf-spectacular будет использовать порядок из вашего кода.
     'SORT_OPERATION_PARAMETERS': False,
 }
 
 CACHES = {
     'default': {
         'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
-        'LOCATION': 'unique-snowflake', # Просто уникальное имя для этого кэша
+        'LOCATION': 'unique-snowflake',
     }
 }
 
@@ -210,3 +203,22 @@ SIMPLE_JWT = {
     "SLIDING_TOKEN_OBTAIN_SERIALIZER": "rest_framework_simplejwt.serializers.TokenObtainSlidingSerializer",
     "SLIDING_TOKEN_REFRESH_SERIALIZER": "rest_framework_simplejwt.serializers.TokenRefreshSlidingSerializer",
 }
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# CORS_ORIGIN_ALLOW_ALL = True
+
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+]

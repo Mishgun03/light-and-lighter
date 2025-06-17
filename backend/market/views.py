@@ -103,6 +103,8 @@ class ListingViewSet(APIView):
 class PriceHistoryListView(APIView):
     CACHE_TIMEOUT = 60 * 15
 
+    serializer_class = PriceHistorySerializer
+
     # @extend_schema()
     def get(self, request, item_id: str):
         return async_to_sync(self.handle_request)(request, item_id)

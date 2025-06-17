@@ -92,7 +92,3 @@ class PriceHistorySerializer(serializers.Serializer):
     min_price = serializers.IntegerField(source='min')
     max_price = serializers.IntegerField(source='max')
     volume = serializers.IntegerField()
-
-    class Meta:
-        # Указываем поля, которые не нужно возвращать
-        exclude = ('item_id',)

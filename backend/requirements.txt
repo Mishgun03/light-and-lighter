@@ -4,6 +4,7 @@ attrs==25.3.0
 certifi==2025.4.26
 charset-normalizer==3.4.2
 Django==5.2.3
+django-cors-headers==4.7.0
 django-filter==25.1
 djangorestframework==3.16.0
 djangorestframework_simplejwt==5.5.0
