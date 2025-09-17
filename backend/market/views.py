@@ -61,7 +61,7 @@ class ItemViewSet(viewsets.ReadOnlyModelViewSet):
 
     @action(detail=True, methods=["get"], permission_classes=[permissions.AllowAny])
     def market(self, request, pk=None):
-        params = {"item_id": pk, "limit": request.query_params.get("limit", 25), "condense": "true"}
+        params = {"item_id": pk, "limit": request.query_params.get("limit", 25), "condense": "true", "page": request.query_params.get("page", 1)}
         data = external_get("/v1/market", params=params)
         # Store price snapshots
         for row in data.get("body", []):
@@ -222,8 +222,6 @@ class AuthView(APIView):
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        # Provide JWT via SimpleJWT token pair endpoint redirect
-        # Frontend should use /api/token/ and /api/token/refresh/ normally
         return Response({"message": "Use /api/token/ to obtain JWT."})
 
 

@@ -1,17 +1,15 @@
-import axios from 'axios'
-import { getToken } from './auth'
+import axios from "axios";
+import { getToken } from "./auth";
 
-const http = axios.create()
+const http = axios.create();
 
 http.interceptors.request.use((config) => {
-  const token = getToken()
+  const token = getToken();
   if (token) {
-    config.headers = config.headers || {}
-    config.headers['Authorization'] = `Bearer ${token}`
+    config.headers = config.headers || {};
+    config.headers["Authorization"] = `Bearer ${token}`;
   }
-  return config
-})
+  return config;
+});
 
-export default http
-
-
+export default http;
