@@ -1,39 +1,13 @@
-#!/bin/sh
+#!/usr/bin/env bash
+set -euo pipefail
 
-FLAG_FILE="/tmp/db_initialized.flag"
+python /app/manage.py migrate --noinput
+python /app/manage.py collectstatic --noinput || true
 
-echo "Waiting for mysql..."
-
-python wait_for_db.py
-
-echo "MySQL started"
-
-echo "Applying database migrations..."
-python manage.py migrate
-
-echo "Starting Django server in background..."
-python manage.py runserver 0.0.0.0:8000 &
-# Сохраняем PID (ID процесса) сервера, чтобы потом его можно было "вернуть"
-SERVER_PID=$!
-
-echo "Waiting for server to start..."
-sleep 5
-
-if [ ! -f "$FLAG_FILE" ]; then
-    echo "First time setup: creating superuser and populating data..."
-
-    # Создаем суперпользователя
-    python manage.py createsuperuser --noinput
-
-    # Запускаем команду для заполнения БД
-    python manage.py populate_items
-
-    # Создаем флаг, чтобы этот блок не выполнялся снова
-    touch $FLAG_FILE
-    echo "First time setup complete."
+if [ "${DJANGO_DEBUG:-False}" = "True" ]; then
+  python /app/manage.py runserver 0.0.0.0:8000
 else
-    echo "Database already initialized. Skipping first time setup."
+  gunicorn core.wsgi:application --bind 0.0.0.0:8000 --workers 3
 fi
 
-echo "Bringing server to foreground..."
-wait $SERVER_PID
+

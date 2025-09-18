@@ -1,192 +1,295 @@
-import httpx
-import hashlib
-from drf_spectacular.utils import extend_schema
-from rest_framework import permissions, viewsets, status, mixins
+from datetime import datetime
+from urllib.parse import urlencode
+
+import requests
+from django.conf import settings
+from django.db.models import Min, Max
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
+from rest_framework import viewsets, permissions, status
+from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from asgiref.sync import async_to_sync
 
-from .models import Favorite
-from .serializers import FavoriteReadSerializer, FavoriteWriteSerializer, PriceHistorySerializer, ListingSerializer, \
-    ListingQuerySerializer
-
-from django.core.cache import cache
-
-
-class ListingViewSet(APIView):
-    CACHE_TIMEOUT = 60 * 5
-
-    @extend_schema(
-        parameters=[ListingQuerySerializer],
-        responses={200: ListingSerializer},
-        # ...
-    )
-    def get(self, request, *args, **kwargs):
-        query_serializer = ListingQuerySerializer(data=request.query_params)
-        query_serializer.is_valid(raise_exception=True)
-        validated_data = query_serializer.validated_data
-
-        user_sort_preference = validated_data.get('sort')
-
-        item_name = validated_data.get('item_name')
-        validated_data.pop('item_name', None)
-        validated_data["item"] = item_name
-
-        if item_name:
-            item_name_hash = hashlib.md5(item_name.encode('utf-8')).hexdigest()
-        else:
-            item_name_hash = 'all'
+from .models import Item, PriceSnapshot, Favorite, LeaderboardEntry, PopulationSnapshot
+from .serializers import (
+    ItemSerializer,
+    PriceSnapshotSerializer,
+    FavoriteSerializer,
+    LeaderboardEntrySerializer,
+    PopulationSnapshotSerializer,
+)
 
 
-        cache_key_parts = [
-            'listing',
-            item_name_hash,
-            validated_data.get('rarity') or 'all',
-            user_sort_preference,
-            validated_data.get('cursor'),
-            validated_data.get('limit'),
-            validated_data.get('page'),
-        ]
-        cache_key = "_".join(map(str, filter(None, cache_key_parts)))
-
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            print(f"CACHE HIT: {cache_key}")
-            return Response(cached_data, status=status.HTTP_200_OK)
-
-        print(f"CACHE MISS: {cache_key}")
-
-        api_params = {
-            key: value
-            for key, value in validated_data.items()
-            if value is not None
-        }
-
-        api_params.pop('sort', None)
-
-        if user_sort_preference == 'date_asc':
-            api_params['order'] = 'asc'
-        elif user_sort_preference == 'date_desc':
-            api_params['order'] = 'desc'
-        elif user_sort_preference in ['price_asc', 'price_desc']:
-            api_params['order'] = 'desc'
-
-        # print(api_params)
-
-        external_api_url = "https://api.darkerdb.com/v1/market"
-        try:
-            with httpx.Client() as client:
-                response = client.get(external_api_url, params=api_params)
-                response.raise_for_status()
-                external_data = response.json()
-        except Exception as e:
-            return Response({"error": str(e)}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        results_list = external_data.get('body', [])
-
-        if user_sort_preference in ['price_asc', 'price_desc']:
-            is_reverse = (user_sort_preference == 'price_desc')
-            results_list.sort(key=lambda item: item.get('price', 0), reverse=is_reverse)
-            external_data['body'] = results_list
-
-        serializer = ListingSerializer(
-            instance=external_data,
-            context={'request': request},
-        )
-        transformed_data = serializer.data
-
-        cache.set(cache_key, transformed_data, timeout=self.CACHE_TIMEOUT)
-
-        return Response(transformed_data, status=status.HTTP_200_OK)
+def external_get(path: str, params: dict | None = None):
+    params = params or {}
+    if settings.DARKERDB_API_KEY:
+        params.setdefault("key", settings.DARKERDB_API_KEY)
+    url = f"{settings.DARKERDB_API_BASE}{path}"
+    res = requests.get(url, params=params, timeout=20)
+    res.raise_for_status()
+    return res.json()
 
 
-class PriceHistoryListView(APIView):
-    CACHE_TIMEOUT = 60 * 15
+class ItemViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Item.objects.all().order_by("name")
+    serializer_class = ItemSerializer
+    permission_classes = [permissions.AllowAny]
 
-    serializer_class = PriceHistorySerializer
-
-    # @extend_schema()
-    def get(self, request, item_id: str):
-        return async_to_sync(self.handle_request)(request, item_id)
-
-    async def handle_request(self, request, item_id: str):
-        from_date = request.query_params.get('from', '7d')
-        to_date = request.query_params.get('to', 'now')
-        interval = request.query_params.get('interval', '15m')
-
-        cache_key = f"item_history:{item_id}:{from_date}:{to_date}:{interval}"
-
-        cached_data = cache.get(cache_key)
-        if cached_data:
-            return Response(cached_data, status=status.HTTP_200_OK)
-
-        external_api_url = f"https://api.darkerdb.com/v1/market/analytics/{item_id}/prices/history"
-        params = {
-            'from': from_date,
-            'to': to_date,
-            'interval': interval,
-        }
-
-        try:
-            async with httpx.AsyncClient() as client:
-                api_response = await client.get(external_api_url, params=params, timeout=10.0)
-                print(api_response)
-                api_response.raise_for_status()
-
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                return Response(
-                    {"detail": f"Item with id '{item_id}' not found."},
-                    status=status.HTTP_404_NOT_FOUND
-                )
-            return Response(
-                {"detail": f"External API error: {e.response.status_code}"},
-                status=status.HTTP_502_BAD_GATEWAY
+    def list(self, request, *args, **kwargs):
+        # Proxy to external API for search; optionally sync minimal fields locally
+        query_params = {k: v for k, v in request.query_params.items()}
+        data = external_get("/v1/items", params=query_params)
+        body = data.get("body", [])
+        # Upsert items asynchronously in a real app; here do minimal sync
+        for item in body:
+            Item.objects.update_or_create(
+                id=item["id"],
+                defaults={
+                    "archetype": item.get("archetype", ""),
+                    "name": item.get("name", ""),
+                    "rarity": item.get("rarity", ""),
+                    "type": item.get("type", ""),
+                    "slot_type": item.get("slot_type"),
+                    "armor_type": item.get("armor_type"),
+                    "gear_score": item.get("gear_score"),
+                    "vendor_price": item.get("vendor_price"),
+                    "data": item,
+                },
             )
-        except httpx.RequestError as e:
-            return Response(
-                {"detail": f"Could not connect to external API: {str(e)}"},
-                status=status.HTTP_502_BAD_GATEWAY
+        return Response(data)
+
+    @action(detail=True, methods=["get"], permission_classes=[permissions.AllowAny])
+    def market(self, request, pk=None):
+        params = {"item_id": pk, "limit": request.query_params.get("limit", 25), "condense": "true", "page": request.query_params.get("page", 1)}
+        data = external_get("/v1/market", params=params)
+        # Store price snapshots
+        for row in data.get("body", []):
+            item = Item.objects.filter(id=row.get("item_id")).first()
+            if not item:
+                continue
+            PriceSnapshot.objects.update_or_create(
+                market_id=row.get("id"),
+                defaults={
+                    "item": item,
+                    "price": row.get("price", 0),
+                    "price_per_unit": row.get("price_per_unit"),
+                    "quantity": row.get("quantity", 1),
+                    "created_at": row.get("created_at"),
+                    "has_sold": row.get("has_sold", False),
+                    "has_expired": row.get("has_expired", False),
+                    "attributes": {k: v for k, v in row.items() if k.startswith("primary_") or k.startswith("secondary_")},
+                },
             )
+        return Response(data)
 
-        external_data = api_response.json()
-        history_list = external_data.get('body')
-
-        if history_list is None:
-            return Response(
-                {"detail": "Invalid response format from external API."},
-                status=status.HTTP_502_BAD_GATEWAY
-            )
-
-        serializer = PriceHistorySerializer(instance=history_list, many=True)
-
-        final_data = serializer.data
-
-        cache.set(cache_key, final_data, timeout=self.CACHE_TIMEOUT)
-
-        return Response(final_data, status=status.HTTP_200_OK)
+    @action(detail=True, methods=["get"], permission_classes=[permissions.AllowAny])
+    def icon(self, request, pk=None):
+        # Cache item icon under media/icons/{id}.png
+        filename = f"icons/{pk}.png"
+        if default_storage.exists(filename):
+            url = default_storage.url(filename)
+            return Response({"icon": url})
+        # Fetch from external API
+        params = {"key": settings.DARKERDB_API_KEY} if settings.DARKERDB_API_KEY else {}
+        url = f"{settings.DARKERDB_API_BASE}/v1/items/{pk}/icon"
+        r = requests.get(url, params=params, timeout=30)
+        r.raise_for_status()
+        default_storage.save(filename, ContentFile(r.content))
+        return Response({"icon": default_storage.url(filename)})
 
 
-class FavoriteViewSet(mixins.CreateModelMixin,  # Обрабатывает POST
-                      mixins.ListModelMixin,  # Обрабатывает GET
-                      mixins.DestroyModelMixin,  # Обрабатывает DELETE
-                      viewsets.GenericViewSet):
-
+class FavoriteViewSet(viewsets.ModelViewSet):
+    serializer_class = FavoriteSerializer
     permission_classes = [permissions.IsAuthenticated]
-    lookup_field = 'item__item_id'
-
-    lookup_url_kwarg = 'item_id'
-
-    pagination_class = None
 
     def get_queryset(self):
-        user = self.request.user
-        return Favorite.objects.filter(user=user).select_related('item')
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return FavoriteWriteSerializer
-        return FavoriteReadSerializer
+        return Favorite.objects.filter(user=self.request.user).select_related("item")
 
     def perform_create(self, serializer):
-        serializer.save(user=self.request.user)
+        item_id = self.request.data.get("item_id")
+        item = Item.objects.filter(pk=item_id).first()
+        if not item:
+            # Try to fetch from external API and upsert
+            try:
+                data = external_get(f"/v1/items/{item_id}", params={"condense": "true"})
+                body = data.get("body", {})
+                if body:
+                    item, _ = Item.objects.update_or_create(
+                        id=body.get("id", item_id),
+                        defaults={
+                            "archetype": body.get("archetype", ""),
+                            "name": body.get("name", item_id),
+                            "rarity": body.get("rarity", ""),
+                            "type": body.get("type", ""),
+                            "slot_type": body.get("slot_type"),
+                            "armor_type": body.get("armor_type"),
+                            "gear_score": body.get("gear_score"),
+                            "vendor_price": body.get("vendor_price"),
+                            "data": body,
+                        },
+                    )
+            except Exception:
+                pass
+        if not item:
+            raise ValueError("Unknown item_id")
+        serializer.save(user=self.request.user, item=item)
+
+    @action(detail=False, methods=["post"], permission_classes=[permissions.IsAuthenticated])
+    def remove(self, request):
+        item_id = request.data.get("item_id")
+        Favorite.objects.filter(user=request.user, item_id=item_id).delete()
+        return Response({"ok": True})
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated])
+    def charts(self, request):
+        # Aggregate min/max per day for user's favorites
+        item_ids = self.get_queryset().values_list("item_id", flat=True)
+        snapshots = (
+            PriceSnapshot.objects.filter(item_id__in=item_ids)
+            .values("item_id")
+            .annotate(min_price=Min("price"), max_price=Max("price"))
+        )
+        return Response(list(snapshots))
+
+
+class DashboardView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        favorites = Favorite.objects.filter(user=request.user).select_related("item")
+        favs = [
+            {
+                "id": f.id,
+                "created_at": f.created_at,
+                "item": ItemSerializer(f.item).data,
+                "latest_price": PriceSnapshot.objects.filter(item=f.item).order_by("-created_at").values("price").first() or {},
+            }
+            for f in favorites
+        ]
+        population = PopulationSnapshot.objects.order_by("-timestamp").first()
+        return Response({
+            "favorites": favs,
+            "population": PopulationSnapshotSerializer(population).data if population else None,
+        })
+
+
+class LeaderboardView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        leaderboard_id = request.query_params.get("id", "EA6_SHR")
+        data = external_get(f"/v1/leaderboards/{leaderboard_id}")
+        # Optionally refresh cache
+        LeaderboardEntry.objects.filter(leaderboard_id=leaderboard_id).delete()
+        for row in data.get("body", []):
+            LeaderboardEntry.objects.create(
+                leaderboard_id=leaderboard_id,
+                character=row.get("character"),
+                character_class=row.get("class"),
+                rank=row.get("rank"),
+                score=row.get("score"),
+                current_position=row.get("current_position"),
+                previous_position=row.get("previous_position"),
+            )
+        return Response({
+            "id": leaderboard_id,
+            "entries": LeaderboardEntrySerializer(
+                LeaderboardEntry.objects.filter(leaderboard_id=leaderboard_id).order_by("current_position"), many=True
+            ).data,
+        })
+
+
+class PopulationView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request):
+        data = external_get("/v1/population")
+        body = data.get("body", {})
+        if body:
+            PopulationSnapshot.objects.update_or_create(
+                timestamp=body.get("timestamp"),
+                defaults={
+                    "num_online": body.get("num_online", 0),
+                    "num_lobby": body.get("num_lobby", 0),
+                    "num_dungeon": body.get("num_dungeon", 0),
+                },
+            )
+        return Response(data)
+
+
+class AuthView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        return Response({"message": "Use /api/token/ to obtain JWT."})
+
+
+class RegisterView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        from django.contrib.auth.models import User
+        username = request.data.get("username")
+        email = request.data.get("email")
+        password = request.data.get("password")
+        if not username or not password:
+            return Response({"detail": "username and password required"}, status=status.HTTP_400_BAD_REQUEST)
+        if User.objects.filter(username=username).exists():
+            return Response({"detail": "username already exists"}, status=status.HTTP_400_BAD_REQUEST)
+        user = User.objects.create_user(username=username, email=email, password=password)
+        return Response({"id": user.id, "username": user.username, "email": user.email})
+
+
+class PasswordResetRequestView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        from django.contrib.auth.models import User
+        from django.core.mail import send_mail
+        email = request.data.get("email")
+        user = User.objects.filter(email=email).first()
+        if not user:
+            return Response({"ok": True})
+        # Simple tokenless flow for demo (console email)
+        send_mail(
+            subject="Password reset instructions",
+            message="Contact admin to reset password in this demo.",
+            from_email=None,
+            recipient_list=[email],
+            fail_silently=True,
+        )
+        return Response({"ok": True})
+
+
+class PriceHistoryView(APIView):
+    permission_classes = [permissions.AllowAny]
+
+    def get(self, request, item_id: str):
+        # Prefer external analytics for rich history; fallback to local snapshots
+        interval = request.query_params.get("interval", "1h")
+        try:
+            data = external_get(f"/v1/market/analytics/{item_id}/prices/history", params={"interval": interval})
+            body = data.get("body", [])
+            transformed = [
+                {
+                    "created_at": row.get("timestamp"),
+                    "avg": row.get("avg"),
+                    "min": row.get("min"),
+                    "max": row.get("max"),
+                    "volume": row.get("volume"),
+                }
+                for row in body
+            ]
+            return Response(transformed)
+        except Exception:
+            # Fallback to local snapshots if external analytics unavailable
+            limit = int(request.query_params.get("limit", 100))
+            qs = (
+                PriceSnapshot.objects.filter(item_id=item_id)
+                .order_by("-created_at")
+                .values("created_at", "price")[:limit]
+            )
+            return Response(list(reversed(list(qs))))
+
+
