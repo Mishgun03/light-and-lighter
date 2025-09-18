@@ -12,7 +12,7 @@ export default defineConfig({
         rewrite: (path) => path.replace('/darkerdb', '/v1'),
       },
       '/api': {
-        target: process.env.VITE_BACKEND_URL || 'http://backend:8000',
+        target: 'http://172.17.0.1:8000',
         changeOrigin: true,
       }
     }
