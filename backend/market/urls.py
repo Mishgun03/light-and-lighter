@@ -1,17 +1,30 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import PriceHistoryListView, FavoriteViewSet, ListingViewSet
+from .views import (
+    ItemViewSet,
+    FavoriteViewSet,
+    DashboardView,
+    LeaderboardView,
+    PopulationView,
+    AuthView,
+    RegisterView,
+    PasswordResetRequestView,
+    PriceHistoryView,
+)
 
 router = DefaultRouter()
-router.register(r'favorites', FavoriteViewSet, basename='favorite')
+router.register(r"items", ItemViewSet, basename="item")
+router.register(r"favorites", FavoriteViewSet, basename="favorite")
 
-api_patterns = [
-    path('listings/', ListingViewSet.as_view(), name='listing'),
-    path('items/<str:item_id>/history/', PriceHistoryListView.as_view(), name='price-history'),
+urlpatterns = [
+    path("auth/", AuthView.as_view(), name="auth"),
+    path("auth/register/", RegisterView.as_view(), name="register"),
+    path("auth/password-reset/", PasswordResetRequestView.as_view(), name="password_reset"),
+    path("dashboard/", DashboardView.as_view(), name="dashboard"),
+    path("leaderboard/", LeaderboardView.as_view(), name="leaderboard"),
+    path("population/", PopulationView.as_view(), name="population"),
+    path("items/<str:item_id>/history/", PriceHistoryView.as_view(), name="price_history"),
+    path("", include(router.urls)),
 ]
 
-user_patterns = [
-    path('', include(router.urls)),
-]
 
-urlpatterns = api_patterns + user_patterns
