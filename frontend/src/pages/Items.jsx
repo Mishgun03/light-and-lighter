@@ -50,7 +50,7 @@ export default function Items() {
 
   const {
     data,
-    fetch,
+    refetch,
     isLoading: loading,
   } = useQuery({
     queryFn: () =>
@@ -69,7 +69,7 @@ export default function Items() {
   });
 
   const handleFetchItems = () => {
-    fetch();
+    refetch();
   };
 
   const pagination = data?.pagination;
